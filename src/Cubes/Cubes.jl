@@ -528,6 +528,58 @@ element types instead of throwing `"Type ... does not have a definite size"`.
 """
 _elsize(::Type{T}) where {T} = isconcretetype(T) && isbitstype(T) ? sizeof(T) : sizeof(Ptr{Cvoid})
 
+# Rough constant byte overhead of a heap-allocated `String` object beyond its
+# code units (object header + length field + null terminator, alignment-rounded).
+const _STRING_OBJ_OVERHEAD = 16
+
+"""
+    _buffer_elsize(a; nsample=1000)
+
+Estimate the average in-memory byte size of one element of array `a`, for sizing
+copy buffers. For fixed-size element types this is just `_elsize(eltype(a))`.
+
+For variable-length string elements the type carries no length information, so
+`_elsize` only counts the array's reference slot (a pointer) and badly
+underestimates the memory a materialized block occupies. Here we instead sample
+actual elements and add the estimated heap payload (code units plus per-object
+overhead) to the pointer slot.
+"""
+_buffer_elsize(a::AbstractArray; nsample=1000) = _elsize(eltype(a))
+
+function _buffer_elsize(a::AbstractArray{<:Union{Missing,AbstractString}}; nsample=1000)
+    length(a) == 0 && return _elsize(eltype(a))
+    tot = 0
+    cnt = 0
+    for s in _sample_elements(a, nsample)
+        s === missing && continue
+        tot += ncodeunits(s) + _STRING_OBJ_OVERHEAD
+        cnt += 1
+    end
+    cnt == 0 && return _elsize(eltype(a))
+    # array reference slot (pointer) + average heap payload
+    return sizeof(Ptr{Cvoid}) + tot ÷ cnt
+end
+
+# Cheaply draw a bounded sample of elements from `a`. Restrict to a sub-box at
+# the start of the first chunk so we materialize at most ~`nsample` elements
+# (and, for disk-backed arrays, read no more than a single chunk) instead of
+# pulling the whole — possibly very large — chunk into memory.
+function _sample_elements(a::AbstractArray, nsample)
+    sub = _bounded_subbox(first(eachchunk(a)), nsample)
+    return vec(a[sub...])
+end
+
+# Shrink a chunk's per-dimension index ranges to a sub-box whose total element
+# count does not exceed `nsample`, filling inner dimensions first.
+function _bounded_subbox(ranges, nsample)
+    acc = 1
+    map(ranges) do r
+        take = min(length(r), max(1, nsample ÷ acc))
+        acc *= take
+        first(r):(first(r) + take - 1)
+    end
+end
+
 cubesize(c::YAXArray{T}) where {T} = _elsize(T) * prod(map(length, caxes(c)))
 cubesize(::YAXArray{T,0}) where {T} = _elsize(T)
 

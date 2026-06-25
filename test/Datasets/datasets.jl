@@ -624,3 +624,27 @@ end
     @test ispath(f)
     @test collect(Cube(f).data) == data
 end
+
+@testset "Copy-buffer size estimate for strings" begin
+    using YAXArrays
+    _buffer_elsize = YAXArrays.Cubes._buffer_elsize
+
+    # Fixed-size types fall back to `_elsize` exactly.
+    nums = YAXArray((Dim{:Ax}(1:100),), rand(100))
+    @test _buffer_elsize(nums.data) == 8
+
+    # For strings the estimate reflects the sampled payload, so it is much
+    # larger than the pointer-only `_elsize` and grows with string length.
+    short = YAXArray((Dim{:Ax}(1:1000),), fill("ab", 1000))
+    long = YAXArray((Dim{:Ax}(1:1000),), fill("a"^10_000, 1000))
+    @test _buffer_elsize(short.data) > sizeof(Ptr{Cvoid})
+    @test _buffer_elsize(long.data) > _buffer_elsize(short.data)
+    @test _buffer_elsize(long.data) >= 10_000
+
+    # Large strings round-trip correctly through the copy path.
+    bigdata = [string(i, ":", "x"^5000) for i in 1:50]
+    b = YAXArray((Dim{:Ax}(1:50),), bigdata)
+    f = string(tempname(), ".zarr")
+    savecube(b, f, backend=:zarr)
+    @test collect(Cube(f).data) == bigdata
+end
